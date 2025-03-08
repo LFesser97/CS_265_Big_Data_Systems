@@ -108,7 +108,8 @@ def experiment():
     batch = torch.randn(batch_size, dim).to(device_str)
     optim = torch.optim.Adam(
         model.parameters(), lr=0.01,
-        foreach=True,  # fused=True,
+        # foreach=True,  # fused=True,
+        foreach=False,
         capturable=True
     )
 
