@@ -11,6 +11,27 @@ import torch.nn as nn
 from graph_prof import GraphProfiler
 from graph_tracer import SEPFunction, compile
 
+# Additional functionality to log the output
+
+import sys
+
+class Logger:
+    def __init__(self, filename):
+        self.terminal = sys.stdout  # original stdout
+        self.log_file = open(filename, "a")  # open file in append mode
+
+    def write(self, message):
+        self.terminal.write(message)  # print to terminal
+        self.log_file.write(message)  # write to file
+
+    def flush(self):
+        self.terminal.flush()
+        self.log_file.flush()
+
+# Redirect sys.stdout to our Logger
+sys.stdout = Logger("output.txt")
+
+
 # This is the dummy model that is for use in starter code. But we will
 # experiment with Resnet and Transformer model.
 
@@ -20,7 +41,8 @@ class DummyModel(nn.Module):
         super().__init__()
         modules = []
         for _ in range(layers):
-            modules.extend([nn.Linear(dim, dim), nn.ReLU()])
+            # modules.extend([nn.Linear(dim, dim), nn.ReLU()])
+            modules.extend([nn.Linear(dim, dim, bias=False)])
         self.mod = nn.Sequential(*modules)
 
     def forward(self, x):
@@ -60,8 +82,8 @@ def train_step(
 
 
 def graph_transformation(gm: fx.GraphModule, args: Any) -> fx.GraphModule:
-    print(gm.graph)
-    graph_profiler = GraphProfiler(gm)
+    # print(gm.graph)
+    graph_profiler = GraphProfiler(gm) #GraphProfiler(gm)
     warm_up_iters, profile_iters = 2, 3
     with torch.no_grad():
         for _ in range(warm_up_iters):
@@ -99,9 +121,9 @@ def experiment():
     logging.getLogger().setLevel(logging.DEBUG)
     torch.manual_seed(20)
     batch_size = 1000
-    layers = 10
+    layers = 2
     dim = 100
-    num_iters = 5
+    num_iters = 1
 
     device_str = 'cuda:0'
     model = DummyModel(dim=dim, layers=layers).to(device_str)
