@@ -134,8 +134,8 @@ class GraphProfiler(fx.Interpreter):
         print("Node target:", n.target)
         print("Input to this node:", n.all_input_nodes)
         print("Users of this node:", n.users)
-        print("Node Output Type", getattr(n, "node_type", "Not categorized"))
-        if getattr(n, "node_type", None) == NodeType.ACT:
+        print("Node Output Type:", getattr(n, "node_type", "Not categorized"))
+        if getattr(n, "node_type", None) == NodeType.ACT or getattr(n, "node_type", None) == NodeType.GRAD:
             print("First use of this activation:", getattr(n, "first_appearance", "First appearance unknown"))
             print("Last use of this activation:", getattr(n, "last_appearance", "Last appearance unknown"))
         print("Node memory consumption:", getattr(n, "mem_used", "Not profiled"))
@@ -149,7 +149,7 @@ class GraphProfiler(fx.Interpreter):
         # Iterate over the graph nodes in order (the order reflects their appearance).
         for idx, node in enumerate(graph_module.graph.nodes):
             # Check if the node is classified as an activation.
-            if getattr(node, "node_type", None) == NodeType.ACT:
+            if getattr(node, "node_type", None) == NodeType.ACT or getattr(node, "node_type", None) == NodeType.GRAD:
                 # Only add the attribute if it hasn't been set already.
                 if not hasattr(node, "first_appearance"):
                     node.first_appearance = idx

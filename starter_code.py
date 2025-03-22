@@ -7,6 +7,7 @@ import torch
 import torch.fx as fx
 import torch.multiprocessing as mp
 import torch.nn as nn
+import torchvision.models as models
 
 from graph_prof import GraphProfiler
 from graph_tracer import SEPFunction, compile
@@ -41,13 +42,14 @@ class DummyModel(nn.Module):
         super().__init__()
         modules = []
         for _ in range(layers):
-            # modules.extend([nn.Linear(dim, dim), nn.ReLU()])
-            modules.extend([nn.Linear(dim, dim, bias=False)])
+            modules.extend([nn.Linear(dim, dim, bias=False), nn.ReLU()])
+            # modules.extend([nn.Linear(dim, dim, bias=False)])
         self.mod = nn.Sequential(*modules)
 
     def forward(self, x):
         return self.mod(x)
 
+rn18 = models.resnet18()
 
 # We wrap the loss with a separator function to call a
 # dummy function 'SEPFunction', which is the separator function, that will call
@@ -120,14 +122,16 @@ def graph_transformation(gm: fx.GraphModule, args: Any) -> fx.GraphModule:
 def experiment():
     logging.getLogger().setLevel(logging.DEBUG)
     torch.manual_seed(20)
-    batch_size = 1000
-    layers = 2
+    batch_size = 500
+    layers = 5
     dim = 100
     num_iters = 1
 
     device_str = 'cuda:0'
-    model = DummyModel(dim=dim, layers=layers).to(device_str)
-    batch = torch.randn(batch_size, dim).to(device_str)
+    # model = DummyModel(dim=dim, layers=layers).to(device_str)
+    # batch = torch.randn(batch_size, dim).to(device_str)
+    model = rn18.to(device_str)
+    batch = torch.rand(batch_size, 3, 224, 224).to(device_str)
     optim = torch.optim.Adam(
         model.parameters(), lr=0.01,
         # foreach=True,  # fused=True,
