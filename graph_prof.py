@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Dict, Any
+from typing import Dict, Any, Set, Tuple, List
 import torch
 import torch.fx as fx
 
@@ -22,7 +22,6 @@ class GraphProfiler(fx.Interpreter):
         super().__init__(module, garbage_collect_values)
 
         optimizer_node = None
-        print("Graph Nodes ", self.module.graph.nodes)
         for node in self.module.graph.nodes:
             if node.op == OP.CALL_FUNCTION and node.target == torch.ops.aten._fused_adam.default:
                 optimizer_node = node
@@ -75,6 +74,15 @@ class GraphProfiler(fx.Interpreter):
 
         # static analysis to determine first and last usage of each activation
         self.run_static_analysis(self.module)
+        
+        # subgraph extraction for later recomputation
+        subgraph, users = self.extract_subgraph(self.module, "convolution")
+        print("Upstream subgraph nodes:", {node.name for node in subgraph.graph.nodes})
+        print("Users of this node:", users)
+        
+        # adjusted_node_list = self.insert_subgraph(subgraph, "convolution", "cudnn_batch_norm_backward_19", users)
+        # print("Adjusted graph nodes:", adjusted_node_list)
+        self.module = self.insert_subgraph(subgraph, "convolution", "cudnn_batch_norm_backward_19", users)
 
         """
         # Print details about each node.
@@ -128,7 +136,7 @@ class GraphProfiler(fx.Interpreter):
         n.mem_used = mem_used
         n.exec_time = exec_time
        
-       # Print details about the current node
+        # Print details about the current node
         print("Node name:", n.name)
         print("Node op:", n.op)
         print("Node target:", n.target)
@@ -141,8 +149,9 @@ class GraphProfiler(fx.Interpreter):
         print("Node memory consumption:", getattr(n, "mem_used", "Not profiled"))
         print("Node execution time:", getattr(n, "exec_time", "Not profiled"))
         print("-" * 40)
-
+        
         return result
+        
 
     def run_static_analysis(self, graph_module: fx.GraphModule) -> None:
         node_indices = {node: idx for idx, node in enumerate(graph_module.graph.nodes)}
@@ -172,4 +181,132 @@ class GraphProfiler(fx.Interpreter):
 
     def reset_stats(self) -> None:
         pass
+    
+    def extract_subgraph(self,
+                         graph_module: fx.GraphModule,
+                         target_node_name: str
+                        ) -> Tuple[fx.GraphModule, List[str]]:
+        """
+        Extracts the upstream subgraph for a given target node in an FX GraphModule while excluding
+        any nodes whose name starts with 'arg'. The extracted subgraph includes all nodes that produce 
+        values consumed by the target node. Instead of modifying the original nodes, the function
+        creates a duplicate subgraph where each node is copied and its name is prefixed with 're_' (if not already).
+        Additionally, it returns a list of names of the target node's direct user nodes.
 
+        Args:
+            graph_module (fx.GraphModule): The FX GraphModule containing the original computation graph.
+            target_node_name (str): The name of the target node marking the end of the subgraph.
+
+        Returns:
+            Tuple[fx.GraphModule, List[str]]:
+                - A new FX GraphModule representing the extracted (duplicated) subgraph.
+                - A list containing the names of the target node's user nodes.
+
+        Raises:
+            ValueError: If no node with the specified target name is found in the graph.
+        """
+        # 1. Locate the target node.
+        target_node = None
+        for node in graph_module.graph.nodes:
+            if node.name == target_node_name:
+                target_node = node
+                break
+        if target_node is None:
+            raise ValueError(f"Node with name '{target_node_name}' not found in the graph.")
+
+        # 2. Recursively collect all upstream nodes (filter out nodes whose name starts with 'arg').
+        collected: List[fx.Node] = []
+        def _collect_upstream(node: fx.Node, collected: List[fx.Node]) -> None:
+            if isinstance(node.name, str) and node.name.startswith("arg"):
+                return
+            if node in collected:
+                return
+            collected.append(node)
+            # Traverse through positional arguments.
+            for arg in node.args:
+                if isinstance(arg, fx.Node):
+                    _collect_upstream(arg, collected)
+            # Traverse through keyword arguments.
+            for value in node.kwargs.values():
+                if isinstance(value, fx.Node):
+                    _collect_upstream(value, collected)
+
+        _collect_upstream(target_node, collected)
+
+        # 3. Sort the collected nodes to preserve their original topological order.
+        original_nodes = list(graph_module.graph.nodes)
+        extracted_nodes = sorted(collected, key=lambda n: original_nodes.index(n))
+
+        # 4. Instead of renaming the original nodes, build a mapping of new names.
+        #    For nodes that do not already start with 're_', the new name will be 're_' + original_name.
+        new_names = {}
+        for node in extracted_nodes:
+            if isinstance(node.name, str) and not node.name.startswith("re_"):
+                new_names[node] = "re_" + node.name
+            else:
+                new_names[node] = node.name
+
+        # 5. Build a list of the target node's direct user names.
+        user_names = [user.name for user in target_node.users]
+
+        # 6. Create a new FX graph and duplicate the extracted nodes into it using the new names.
+        new_graph = fx.Graph()
+        node_mapping = {}
+        for node in extracted_nodes:
+            # Re-map arguments: if an argument is a node already copied, substitute it.
+            new_args = tuple(node_mapping.get(arg, arg) if isinstance(arg, fx.Node) else arg for arg in node.args)
+            new_kwargs = {k: node_mapping.get(v, v) if isinstance(v, fx.Node) else v for k, v in node.kwargs.items()}
+            new_node = new_graph.create_node(node.op, node.target, new_args, new_kwargs, name=new_names[node])
+            node_mapping[node] = new_node
+
+        # 7. Set the output of the new graph to be the duplicate of the target node.
+        new_graph.output(node_mapping[target_node])
+
+        # 8. Create a new FX GraphModule from the new graph using self.module as the root module.
+        new_subgraph_gm = fx.GraphModule(self.module, new_graph)
+
+        return new_subgraph_gm, user_names
+    
+    
+    def insert_subgraph(self,
+                        graph_module: fx.GraphModule,
+                        target_name: str,
+                        earliest_bw_use: str,
+                        users: List
+                       ) -> fx.GraphModule:
+        # Get the nodes from the extracted subgraph.
+        # These nodes should already be ordered in a valid topological order.
+        extracted_nodes = [node for node in list(graph_module.graph.nodes) if node.name != "output"]
+
+        # Access the current computation graph via self.module.
+        current_graph = self.module.graph
+        current_nodes = list(current_graph.nodes)
+
+        # Find the insertion index where the node name matches earliest_bw_use.
+        insertion_index = None
+        for i, node in enumerate(current_nodes):
+            if node.name == earliest_bw_use:
+                insertion_index = i
+                break
+        if insertion_index is None:
+            raise ValueError(f"Node with name '{earliest_bw_use}' not found in the current graph.")
+            
+        new_target_name = "re_" + target_name
+        for node in current_nodes[insertion_index:]:
+            if node.name in users:
+                for input_node in node.all_input_nodes:
+                    if input_node.name == target_name:
+                        input_node.name = new_target_name
+
+        # Create a new node ordering by inserting the extracted subgraph nodes 
+        # right before the found insertion index.
+        new_node_list = current_nodes[:insertion_index] + extracted_nodes + current_nodes[insertion_index:]
+
+        # Update the current graph's internal node list.
+        current_graph._nodes = new_node_list
+
+        # Recompile self.module to update its forward method and reflect graph changes.
+        self.module.recompile()
+
+        return self.module
+        # return new_node_list

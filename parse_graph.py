@@ -228,7 +228,9 @@ if __name__ == '__main__':
     filename = 'output.txt'  # Update the path if necessary.
     node_list = parse_graph_file(filename)
     # for node in node_list:
-        # print(node)
+        # print(node, "\n")
+        
+    print(node_list)
 
     feature_maps = profile_activation_memory(node_list)
     # print("\nFeature Maps:")
@@ -244,4 +246,4 @@ if __name__ == '__main__':
 
     recompute_ratios = compute_activation_recompute_ratio(node_list)
     sorted_recompute_ratios = {k: v for k, v in sorted(recompute_ratios.items(), key=lambda item: item[1], reverse=True)}
-    print(sorted_recompute_ratios)
+    # print(sorted_recompute_ratios)
